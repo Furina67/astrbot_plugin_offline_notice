@@ -168,7 +168,7 @@
         "description": "发送提醒的机器人实例 ID",
         "type": "string",
         "default": "",
-        "hint": "请填写「另一个」在线的机器人实例 ID（如 napcat_main）。留空则自动选择第一个可用的 OneBot v11 实例。⚠️ 不要填被监控的那个账号，它掉线后自己发不出消息。"
+        "hint": "OneBot v11 直发时的机器人实例 ID（如 napcat）。使用 QQ 官方机器人提醒时此项无需填写。⚠️ 不要填被监控的那个账号，它掉线后自己发不出消息。"
       },
       "content": {
         "description": "提醒内容模板",
@@ -185,11 +185,17 @@
         "hint": "可选。会在提醒正文前加一句前缀，例如「【监控提示】」。"
       },
       "umo": {
-        "description": "兜底会话 UMO",
+        "description": "会话 UMO（可选，留空即可）",
         "type": "string",
         "default": "",
         "_special": "umo",
-        "hint": "可选。当无法直接调用机器人 API 时，改用此会话标识发送提醒消息。"
+        "hint": "一般无需填写。机器人收到任何私聊消息时，插件会自动记录该会话 UMO 并保存到插件数据目录 qq_notifier_umo.json，之后主动推送直接复用（QQ 官方机器人走这条通道）。如自动记录失败，也可手动填入 umo，多个用逗号分隔。"
+      },
+      "auto_remember_umo": {
+        "description": "自动记录会话 UMO",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，机器人收到私聊消息时会自动保存该会话 UMO，用于后续主动推送（QQ 官方机器人必需）。"
       }
     }
   }
