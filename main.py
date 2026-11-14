@@ -14,6 +14,8 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star.star_tools import StarTools
 
+from .qq_notifier import QQNotifier
+
 
 @register("astrbot_plugin_offline_notice", "香草味的纳西妲喵（VanillaNahida）", "账号离线邮件通知插件", "1.0.0",
           "https://github.com/VanillaNahida/astrbot_plugin_offline_notice")
@@ -32,6 +34,9 @@ class OfflineNoticePlugin(Star):
         data_dir = StarTools.get_data_dir("astrbot_plugin_offline_notice")
         data_dir.mkdir(parents=True, exist_ok=True)
         self._data_file = data_dir / "uin_nickname.json"
+
+        # QQ 主动提醒（通过另一个机器人向指定 QQ 号推送）
+        self.qq_notifier = QQNotifier(self)
 
     async def initialize(self):
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -177,6 +182,45 @@ class OfflineNoticePlugin(Star):
 
         logger.warning(f"检测到账号离线: {nickname}({user_id}) 平台: {platform_name}")
         await self._send_email(user_id, nickname, platform_name, offline_reason=offline_reason)
+
+        # 邮件之外，再通过「另一个机器人」向指定 QQ 号推送提醒
+        await self._send_qq_reminder(user_id, nickname, platform_name)
+
+    def _plain_offline_reason(self, platform_name):
+        """把离线原因从 HTML 表格转换为纯文本，供 QQ 消息使用。"""
+        notices = self._offline_notices.get(platform_name, [])
+        if not notices:
+            return ""
+        lines = ["📋 离线通知详情："]
+        for notice in notices:
+            lines.append(f"· {notice['time']} [{notice['tag']}] {notice['message']}")
+        return "\n" + "\n".join(lines)
+
+    async def _send_qq_reminder(self, user_id, nickname, platform_name):
+        """通过另一个机器人实例向配置的 QQ 号推送离线提醒。"""
+        try:
+            notifier = getattr(self, "qq_notifier", None)
+            if notifier is None or not notifier.is_enabled():
+                return
+            await notifier.push(
+                nickname=str(nickname),
+                uin=str(user_id),
+                platform=str(platform_name),
+                event="🔴 已离线",
+                extra=self._plain_offline_reason(platform_name),
+            )
+        except Exception as e:
+            logger.error(f"QQ 提醒推送异常: {e}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("发送测试提醒")
+    async def send_test_qq_reminder(self, event: AstrMessageEvent):
+        """向配置的目标 QQ 号发送一条测试提醒，用于验证 QQ 提醒配置是否正确。用法：/发送测试提醒"""
+        try:
+            result = await self.qq_notifier.send_test()
+        except Exception as e:
+            result = f"❌ 测试失败：{e}"
+        yield event.plain_result(result)
 
     def _build_offline_reason(self, platform_name):
         notices = self._offline_notices.get(platform_name, [])
