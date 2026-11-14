@@ -75,6 +75,38 @@ class OfflineNoticePlugin(Star):
         })
         logger.info(f"捕获 bot_offline 通知 [{platform_name}] [{tag}]: {message}")
 
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def remember_session_umo(self, event: AstrMessageEvent):
+        """记录收到的私聊会话 UMO，供 QQ 官方机器人等平台主动推送时复用。"""
+        try:
+            notifier = getattr(self, "qq_notifier", None)
+            if notifier is None:
+                return
+            # 只记录私聊会话，群聊主动消息在 QQ 官方平台常被限制
+            is_private = False
+            try:
+                is_private = bool(event.is_private_chat())
+            except Exception:
+                raw = getattr(event.message_obj, "raw_message", None)
+                if isinstance(raw, dict):
+                    is_private = raw.get("message_type") == "private"
+            if not is_private:
+                return
+
+            umo = event.unified_msg_origin
+            if not umo:
+                return
+            sender_id = ""
+            sender_name = ""
+            try:
+                sender_id = str(event.get_sender_id() or "")
+                sender_name = str(event.get_sender_name() or "")
+            except Exception:
+                pass
+            notifier.remember_umo(umo, sender_id=sender_id, sender_name=sender_name)
+        except Exception as e:
+            logger.warning(f"记录会话 UMO 失败: {e}")
+
     async def _heartbeat_loop(self):
         while True:
             try:
@@ -221,6 +253,16 @@ class OfflineNoticePlugin(Star):
         except Exception as e:
             result = f"❌ 测试失败：{e}"
         yield event.plain_result(result)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("提醒通道")
+    async def show_reminder_channels(self, event: AstrMessageEvent):
+        """查看当前可用的提醒平台实例与会话 UMO。用法：/提醒通道"""
+        try:
+            info = self.qq_notifier.describe_status()
+        except Exception as e:
+            info = f"❌ 查询失败：{e}"
+        yield event.plain_result(info)
 
     def _build_offline_reason(self, platform_name):
         notices = self._offline_notices.get(platform_name, [])
