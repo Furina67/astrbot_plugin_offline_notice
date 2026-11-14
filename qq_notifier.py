@@ -238,6 +238,7 @@ class QQNotifier:
             if self._platform_kind(p) == "onebot":
                 candidates.append(p)
 
+        # wanted 指向 QQ 官方机器人时不做回退，避免误用被监控的 NapCat
         if wanted and not candidates:
             for p in platforms:
                 inst_id = ""
@@ -246,7 +247,11 @@ class QQNotifier:
                 except Exception:
                     pass
                 if wanted in (inst_id, p.__class__.__name__):
-                    candidates.append(p)
+                    if self._platform_kind(p) == "onebot":
+                        candidates.append(p)
+                    else:
+                        logger.info("[QQ提醒] platform_id=" + str(wanted) + " 指向非 OneBot 实例，跳过 OneBot 直发通道")
+                    break
         return candidates
 
     def _iter_official(self):
@@ -260,7 +265,7 @@ class QQNotifier:
     # -- 发送 --------------------------------------------------------------
     async def push(self, *, nickname: str, uin: str, platform: str,
                    event: str, extra: str = "") -> bool:
-        """推送提醒：优先 OneBot 直发，其次 QQ 官方 / UMO 主动消息。"""
+        """推送提醒：优先 QQ 官方机器人 / UMO 会话，其次 OneBot 直发兜底。"""
         if not self.is_enabled():
             logger.debug("[QQ提醒] 未启用或未配置目标 QQ，跳过")
             return False
@@ -271,9 +276,20 @@ class QQNotifier:
             nickname=nickname, uin=uin, platform=platform,
             event=event, time_str=now, extra=extra,
         )
+        logger.info(f"[QQ提醒] push 开始: 目标={targets} platform_id={self.get_platform_id()!r}")
 
-        # 1) OneBot v11（aiocqhttp / NapCat）直发私聊
-        for p in self._iter_candidates():
+        # 1) 优先：QQ 官方机器人 / 跨平台 UMO
+        try:
+            ok = await self._push_by_umo(targets, text)
+            if ok:
+                return True
+        except Exception as e:
+            logger.error(f"[QQ提醒] UMO 通道异常: {type(e).__name__}: {e}")
+
+        # 2) 兜底：OneBot v11（aiocqhttp / NapCat）直发
+        cands = self._iter_candidates()
+        logger.info(f"[QQ提醒] UMO 未成功，回退 OneBot 直发，候选实例 {len(cands)} 个")
+        for p in cands:
             client = None
             try:
                 client = p.get_client()
@@ -281,6 +297,7 @@ class QQNotifier:
                 logger.warning(f"[QQ提醒] 获取客户端失败: {e}")
             api = getattr(client, "api", None) if client is not None else None
             if api is None:
+                logger.warning("[QQ提醒] 该实例无 api，跳过（QQ 官方机器人不支持直发）")
                 continue
 
             ok_any = False
@@ -289,31 +306,28 @@ class QQNotifier:
                     await api.call_action(
                         "send_private_msg", user_id=int(qq), message=text,
                     )
-                    logger.info(f"[QQ提醒] 已通过 OneBot 推送到 QQ {qq}")
+                    logger.info(f"[QQ提醒] OK 已通过 OneBot 推送到 QQ {qq}")
                     ok_any = True
                 except Exception as e:
                     logger.error(f"[QQ提醒] OneBot 推送到 QQ {qq} 失败: {e}")
             if ok_any:
                 return True
 
-        # 2) QQ 官方机器人 / 跨平台 UMO 主动消息
-        ok = await self._push_by_umo(targets, text)
-        if ok:
-            return True
-
         logger.error(
-            "[QQ提醒] 全部通道均失败。请检查：①是否配置了可用的提醒机器人实例；"
-            "②QQ 官方机器人需先让对方主动私聊一次以建立会话。"
+            "[QQ提醒] 全部通道均失败。请检查：1.是否配置了可用的提醒机器人实例；"
+            "2.QQ 官方机器人需先让对方主动私聊一次以建立会话；"
+            "3.官方机器人主动消息可能受平台频次限制。"
         )
         return False
 
     async def _push_by_umo(self, targets: List[str], text: str) -> bool:
         """按 UMO 主动发送（跨平台通用，QQ 官方机器人主通道）。"""
         umos = self.get_umo_list()
+        logger.info(f"[QQ提醒] UMO 通道启动，可用会话 {len(umos)} 个: {umos}")
         if not umos:
             logger.warning(
                 "[QQ提醒] 没有可用的 UMO。若使用 QQ 官方机器人，请先私聊该机器人任意一句，"
-                "插件会自动记录会话。"
+                "插件会自动记录会话；也可在配置中手动填写 UMO。"
             )
             return False
 
@@ -324,15 +338,38 @@ class QQNotifier:
             logger.error(f"[QQ提醒] 导入消息组件失败: {e}")
             return False
 
-        chain = MessageChain().message(Plain(text))
+        text = str(text)
+        chain = None
+        last_err = None
+        # A) 推荐：Plain(text) + MessageChain().message()
+        try:
+            chain = MessageChain().message(Plain(text))
+        except Exception as e1:
+            last_err = e1
+            # B) 列表构造
+            try:
+                chain = MessageChain([Plain(text)])
+            except Exception as e2:
+                last_err = e2
+                # C) 直接传字符串
+                try:
+                    chain = MessageChain().message(text)
+                except Exception as e3:
+                    last_err = e3
+
+        if chain is None:
+            logger.error(f"[QQ提醒] 构造消息链失败: {type(last_err).__name__}: {last_err}")
+            return False
+
         ok = False
         for umo in umos:
             try:
+                logger.info(f"[QQ提醒] 尝试 UMO 发送 -> {umo}")
                 await self.plugin.context.send_message(umo, chain)
-                logger.info(f"[QQ提醒] 已通过 UMO 发送: {umo}")
+                logger.info(f"[QQ提醒] OK 已通过 UMO 发送: {umo}")
                 ok = True
             except Exception as e:
-                logger.error(f"[QQ提醒] UMO 发送失败 {umo}: {e}")
+                logger.error(f"[QQ提醒] UMO 发送失败 {umo}: {type(e).__name__}: {e}")
         return ok
 
     # -- 自检指令用 --------------------------------------------------------
